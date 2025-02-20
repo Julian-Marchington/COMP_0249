@@ -70,7 +70,7 @@ classdef PlatformPredictionEdge < g2o.core.BaseBinaryEdge
             M = [cos(psi) -sin(psi) 0;
                  sin(psi)  cos(psi) 0;
                  0         0        1];
-            
+
             % Compute the predicted state assuming zero process noise:
             % Multiply the control input by dT to convert from a velocity to a displacement.
             predictedX = priorX + M * (obj.dT * obj.z);
@@ -111,13 +111,10 @@ classdef PlatformPredictionEdge < g2o.core.BaseBinaryEdge
             
             % Compute the error: transform the state difference into the vehicle's frame
             % and subtract the expected displacement (dT scaled control input).
-            error = M_inv * deltaX - obj.dT * obj.z;
+            obj.errorZ = (1/obj.dT) * (M_inv * deltaX) - obj.z;
             
             % Normalize the heading error.
-            error(3) = g2o.stuff.normalize_theta(error(3));
-            
-            % Store the computed error.
-            obj.errorZ = error;
+            obj.errorZ(3) = g2o.stuff.normalize_theta(obj.errorZ(3));
         end
         
         % Compute the Jacobians
@@ -148,7 +145,7 @@ classdef PlatformPredictionEdge < g2o.core.BaseBinaryEdge
             deltaX = obj.edgeVertices{2}.x - priorX;
             
             % Jacobian with respect to x_(k+1) is simply M(ψ_k)^{-1}.
-            obj.J{2} = M_inv;
+            obj.J{2} = (1/obj.dT) * M_inv;
             
             % Jacobian with respect to x_k:
             % We have two contributions:
@@ -156,17 +153,16 @@ classdef PlatformPredictionEdge < g2o.core.BaseBinaryEdge
             % 2. The derivative of M_inv with respect to ψ (which only affects the third column)
             %    multiplied by (x_(k+1)-x_k). Using the derivation in the VehicleKinematicsEdge:
             %
-            obj.J{1} = zeros(3,3);
-            obj.J{1}(1,1) = -c;
-            obj.J{1}(1,2) = -s;
-            obj.J{1}(1,3) = -deltaX(1)*s + deltaX(2)*c;
+            % obj.J{1} = zeros(3,3);
+            obj.J{1}(1,1) = -(1/obj.dT)*c;
+            obj.J{1}(1,2) = -(1/obj.dT)*s;
+            obj.J{1}(1,3) = (1/obj.dT)*(-deltaX(1)*s + deltaX(2)*c);
             
-            obj.J{1}(2,1) = s;
-            obj.J{1}(2,2) = -c;
-            obj.J{1}(2,3) = -deltaX(1)*c - deltaX(2)*s;
+            obj.J{1}(2,1) = (1/obj.dT)*s;
+            obj.J{1}(2,2) = (1/obj.dT)*(-c);
+            obj.J{1}(2,3) = (1/obj.dT)*(-deltaX(1)*c - deltaX(2)*s);
             
-            % For the yaw component, the derivative is simply -1.
-            obj.J{1}(3,3) = -1;
+            obj.J{1}(3,3) = (1/obj.dT)*(-1);
             
             % Note: The dT * u term does not contribute to the Jacobians because it is constant.
         end
