@@ -8,7 +8,7 @@ classdef PlatformPredictionEdge < g2o.core.BaseBinaryEdge
     %
     % Define the rotation vector
     %
-    %   M = [cos(theta) -sin(theta) 0; sin(theta) cos(theta) 0;0 0 1];
+    %   M = dT * [cos(theta) -sin(theta) 0; sin(theta) cos(theta) 0;0 0 1];
     %
     % The new state is predicted from 
     %
@@ -50,34 +50,36 @@ classdef PlatformPredictionEdge < g2o.core.BaseBinaryEdge
         end
        
         function initialEstimate(obj)
-            % INITIAL ESTIMATE
+            % INITIALESTIMATE Compute the initial estimate of a platform.
             %
-            % Provide an initial guess for x_{k+1} given x_{k}.
-            % Since this factor has a measurement of zero (the mean of 
-            % the process noise), we can simply set x_{k+1} = x_{k} 
-            % (or include a motion model if we had one).
+            % Syntax:
+            %   obj.initialEstimate();
+            %
+            % Description:
+            %   Compute the initial estimate of the platform x_(k+1) given
+            %   an estimate of the platform at time x_(k) and the control
+            %   input u_(k+1)
 
-            % Retrieve the current state (vertex slot 1) 
-            xk = obj.edgeVertices{1}.x;   % xk = [x; y; theta]
+            % Retrieve the prior state estimate x_k.
+            priorX = obj.edgeVertices{1}.estimate();
             
-            % Retrieve the control input (odometry measurement)
-            % u is a 3x1 vector: [v_x; v_y; omega]
-            u = obj.measurement;  
+            % Extract the heading (yaw) angle from x_k.
+            psi = priorX(3);
             
-            % Extract the current heading (theta) from xk
-            theta = xk(3);
+            % Compute the rotation matrix M(ψ_k).
+            M = [cos(psi) -sin(psi) 0;
+                 sin(psi)  cos(psi) 0;
+                 0         0        1];
             
-            % Construct the rotation matrix based on the current heading
-            M = [cos(theta) -sin(theta) 0;
-                sin(theta)  cos(theta) 0;
-                0           0          1];
+            % Compute the predicted state assuming zero process noise:
+            % Multiply the control input by dT to convert from a velocity to a displacement.
+            predictedX = priorX + M * (obj.dT * obj.z);
             
-            % Compute the predicted state at time k+1:
-            % Multiply the control input by the time step dT to get the displacement.
-            xk1_pred = xk + M * (u * obj.dT);
+            % Normalize the heading angle to the range [-pi, pi].
+            predictedX(3) = g2o.stuff.normalize_theta(predictedX(3));
             
-            % Set the initial estimate of the second vertex (state at time k+1)
-            obj.edgeVertices{2}.x = xk1_pred;
+            % Set the estimated state for the posterior vertex.
+            obj.edgeVertices{2}.setEstimate(predictedX);
         end
         
         function computeError(obj)
@@ -93,27 +95,28 @@ classdef PlatformPredictionEdge < g2o.core.BaseBinaryEdge
             %   equation has to be rearranged to make the error the subject
             %   of the formulat
                        
-            % Retrieve the states for time k and k+1
-            xk  = obj.edgeVertices{1}.x;  % state at time k: [x; y; theta]
-            xk1 = obj.edgeVertices{2}.x;  % state at time k+1
+            % Get the state x_k from the prior vertex.
+            priorX = obj.edgeVertices{1}.x;
+            psi = priorX(3);
             
-            % Retrieve the control input (odometry measurement)
-            u = obj.measurement;   % [v_x; v_y; omega]
+            % Compute the inverse rotation matrix M(ψ_k)^{-1}.
+            % Since M(ψ) is an orthonormal rotation matrix, its inverse is its transpose.
+            % We write it out explicitly:
+            M_inv = [cos(psi) sin(psi) 0;
+                     -sin(psi) cos(psi) 0;
+                     0         0        1];
             
-            % Get the heading from the state at time k (for constructing M)
-            theta = xk(3);
+            % Compute the state difference (x_(k+1) - x_k).
+            deltaX = obj.edgeVertices{2}.x - priorX;
             
-            % Construct the rotation matrix M based on the current heading
-            M = [cos(theta) -sin(theta) 0;
-                sin(theta)  cos(theta) 0;
-                0           0          1];
+            % Compute the error: transform the state difference into the vehicle's frame
+            % and subtract the expected displacement (dT scaled control input).
+            error = M_inv * deltaX - obj.dT * obj.z;
             
-            % Compute the error. In the absence of noise, we expect:
-            %   inv(M) * (xk1 - xk) = u * dT.
-            % Hence, the error is defined as:
-            error = inv(M) * (xk1 - xk) - (u * obj.dT);
+            % Normalize the heading error.
+            error(3) = g2o.stuff.normalize_theta(error(3));
             
-            % Store the computed error in the edge
+            % Store the computed error.
             obj.errorZ = error;
         end
         
@@ -130,8 +133,42 @@ classdef PlatformPredictionEdge < g2o.core.BaseBinaryEdge
             %   respect to both of them must be computed.
             %
 
-            obj.J{1} = -eye(3);  % derivative with respect to the first vertex (time k)
-            obj.J{2} =  eye(3);  % derivative with respect to the second vertex (time k+1)
+            % Retrieve the prior state x_k.
+            priorX = obj.edgeVertices{1}.x;
+            psi = priorX(3);
+            c = cos(psi);
+            s = sin(psi);
+            
+            % The inverse rotation matrix M(ψ_k)^{-1}:
+            M_inv = [c  s  0;
+                    -s  c  0;
+                     0  0  1];
+            
+            % The state difference (x_(k+1) - x_k).
+            deltaX = obj.edgeVertices{2}.x - priorX;
+            
+            % Jacobian with respect to x_(k+1) is simply M(ψ_k)^{-1}.
+            obj.J{2} = M_inv;
+            
+            % Jacobian with respect to x_k:
+            % We have two contributions:
+            % 1. The derivative of - (x_(k+1)-x_k) gives -I transformed by M_inv: -M_inv.
+            % 2. The derivative of M_inv with respect to ψ (which only affects the third column)
+            %    multiplied by (x_(k+1)-x_k). Using the derivation in the VehicleKinematicsEdge:
+            %
+            obj.J{1} = zeros(3,3);
+            obj.J{1}(1,1) = -c;
+            obj.J{1}(1,2) = -s;
+            obj.J{1}(1,3) = -deltaX(1)*s + deltaX(2)*c;
+            
+            obj.J{1}(2,1) = s;
+            obj.J{1}(2,2) = -c;
+            obj.J{1}(2,3) = -deltaX(1)*c - deltaX(2)*s;
+            
+            % For the yaw component, the derivative is simply -1.
+            obj.J{1}(3,3) = -1;
+            
+            % Note: The dT * u term does not contribute to the Jacobians because it is constant.
         end
     end    
 end

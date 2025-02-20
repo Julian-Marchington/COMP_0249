@@ -62,10 +62,19 @@ classdef LandmarkRangeBearingEdge < g2o.core.BaseBinaryEdge
             %   Compute the initial estimate of the landmark given the
             %   platform pose and observation.
 
-            warning('LandmarkRangeBearingEdge.initialEstimate: implement')
-
-            lx = obj.edgeVertices{1}.x(1:2);
-            obj.edgeVertices{2}.setEstimate(lx);
+            % Retrieve the current vehicle pose (state x) from vertex slot 1.
+            vehicle = obj.edgeVertices{1}.x;  % Expected to be a 3x1 vector: [x; y; theta]
+            
+            % Extract the range and bearing measurements.
+            r = obj.z(1);
+            beta = obj.z(2);
+            
+            % Compute the landmark's position in global coordinates.
+            theta = vehicle(3);
+            landmark_estimate = vehicle(1:2) + r * [cos(theta + beta); sin(theta + beta)];
+            
+            % Set the estimate for the landmark vertex.
+            obj.edgeVertices{2}.setEstimate(landmark_estimate);
         end
         
         function computeError(obj)
@@ -78,9 +87,31 @@ classdef LandmarkRangeBearingEdge < g2o.core.BaseBinaryEdge
             %   Compute the value of the error, which is the difference
             %   between the predicted and actual range-bearing measurement.
 
-            warning('LandmarkRangeBearingEdge.computeError: implement')
-           
-            obj.errorZ = zeros(2, 1);
+            % Retrieve the vehicle pose and landmark position.
+            vehicle = obj.edgeVertices{1}.x;  % [x; y; theta]
+            landmark = obj.edgeVertices{2}.x; % [l_x; l_y]
+            
+            % Compute the differences.
+            dx = landmark(1) - vehicle(1);
+            dy = landmark(2) - vehicle(2);
+            
+            % Predicted range.
+            r_pred = sqrt(dx^2 + dy^2);
+            
+            % Predicted bearing.
+            beta_pred = atan2(dy, dx) - vehicle(3);
+            beta_pred = g2o.stuff.normalize_theta(beta_pred);
+            
+            % Assemble the predicted measurement.
+            h = [r_pred; beta_pred];
+            
+            % Compute the error: measurement - prediction.
+            error = obj.z - h;
+            % Normalize the bearing component of the error.
+            error(2) = g2o.stuff.normalize_theta(error(2));
+            
+            % Store the error.
+            obj.errorZ = error;
         end
         
         function linearizeOplus(obj)
@@ -94,11 +125,39 @@ classdef LandmarkRangeBearingEdge < g2o.core.BaseBinaryEdge
             %   the vertex.
             %
 
-            warning('LandmarkRangeBearingEdge.linearizeOplus: implement')
-
-            obj.J{1} = eye(2, 3);
+            % Retrieve the vehicle state and landmark estimate.
+            vehicle = obj.edgeVertices{1}.x;  % [x; y; theta]
+            landmark = obj.edgeVertices{2}.x; % [l_x; l_y]
             
-            obj.J{2} = eye(2);
-        end        
+            % Compute differences.
+            dx = landmark(1) - vehicle(1);
+            dy = landmark(2) - vehicle(2);
+            r = sqrt(dx^2 + dy^2);
+            
+            % To avoid division by zero, one might check if r is very small.
+            % Here we assume r > 0.
+            
+            % Jacobian with respect to the vehicle pose (2x3 matrix).
+            J_vehicle = zeros(2, 3);
+            J_vehicle(1,1) = dx / r;
+            J_vehicle(1,2) = dy / r;
+            J_vehicle(1,3) = 0;
+            
+            J_vehicle(2,1) = -dy / (r^2);
+            J_vehicle(2,2) = dx / (r^2);
+            J_vehicle(2,3) = 1;
+            
+            obj.J{1} = J_vehicle;
+            
+            % Jacobian with respect to the landmark position (2x2 matrix).
+            J_landmark = zeros(2, 2);
+            J_landmark(1,1) = -dx / r;
+            J_landmark(1,2) = -dy / r;
+            
+            J_landmark(2,1) = dy / (r^2);
+            J_landmark(2,2) = -dx / (r^2);
+            
+            obj.J{2} = J_landmark;
+        end  
     end
 end
